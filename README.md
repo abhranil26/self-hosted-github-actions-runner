@@ -54,11 +54,14 @@ If you prefer using a Personal Access Token (useful for automation or multiple r
    - Method 2: Connect to your Git repository containing this code
 
 3. **Configure Environment Variables**:
-   In the CapRover app settings, add these environment variables:
+   In the CapRover app settings, add these environment variables. Only `GITHUB_URL` and `GITHUB_TOKEN` are required — the runner will fail to start without them. The rest are optional and have sensible defaults.
 
    ```bash
+   # Required
    GITHUB_URL=https://github.com/your-username/your-repository
    GITHUB_TOKEN=your_github_token_here
+
+   # Optional
    RUNNER_NAME=caprover-runner-unique-name
    RUNNER_LABELS=self-hosted,linux,docker,caprover
    ```
@@ -69,10 +72,12 @@ If you prefer using a Personal Access Token (useful for automation or multiple r
 
 ### Required Environment Variables
 
+These two variables are absolutely necessary — the entrypoint script validates them on startup and exits with an error if either is missing.
+
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `GITHUB_URL` | Full URL to your GitHub repository | `https://github.com/username/repo` |
-| `GITHUB_TOKEN` | GitHub token with runner registration permissions | `ghp_xxxxxxxxxxxx` |
+| `GITHUB_URL` | Full URL to your GitHub repository or organization | `https://github.com/username/repo` |
+| `GITHUB_TOKEN` | GitHub runner registration token (or PAT with appropriate scopes) | `ghp_xxxxxxxxxxxx` |
 
 ### Optional Environment Variables
 
