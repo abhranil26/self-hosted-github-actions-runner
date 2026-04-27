@@ -40,7 +40,7 @@ RUNNER_PID=$!
 
 # Watchdog detects silent broker-listener death (upstream actions/runner bug)
 # and kills the runner so CapRover can restart the container into a fresh state.
-/home/runner/watchdog.sh "$RUNNER_PID" &
+/usr/local/bin/watchdog.sh "$RUNNER_PID" &
 WATCHDOG_PID=$!
 
 # Forward shutdown signals to the runner; let it stop gracefully.
