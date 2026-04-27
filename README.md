@@ -7,114 +7,153 @@ A containerized GitHub Actions runner designed to be deployed as a CapRover appl
 - **CapRover Integration**: Deploy as a native CapRover app with dashboard management
 - **Reusable**: Single Docker image works for any GitHub repository
 - **Configurable**: Environment variable-based configuration
-- **Auto-cleanup**: Graceful runner removal on container shutdown
+- **Persistent registration**: Register once, survive restarts and redeploys without needing a fresh token
+- **Self-healing**: Built-in watchdog detects the upstream "broker listener silently dies" bug and forces a restart so the runner doesn't sit idle missing jobs
 - **Scalable**: Easy to deploy multiple runners for different repositories
 - **Secure**: Network isolation through CapRover's container management
 
+## How registration works (read this first)
+
+GitHub registration tokens are valid for **only 1 hour**. If the runner had to re-register on every container restart, you'd need a fresh token every time — painful and easy to get wrong.
+
+This image avoids that by using a **persistent volume on `/home/runner`**. The flow:
+
+1. **First boot:** entrypoint sees no `/home/runner/.runner` file, runs `config.sh` with your one-time `GITHUB_TOKEN`, and writes `.runner` + `.credentials` (a long-lived RSA keypair) to the volume.
+2. **Every boot after that:** entrypoint sees the existing config, skips registration entirely, and goes straight to `run.sh`. The runner reconnects to GitHub using the RSA keypair on the volume — no token needed.
+
+You only ever supply a registration token **once per app**. After that you can clear the env var and restart freely.
+
 ## Prerequisites
 
-- CapRover instance running and accessible
+- CapRover instance running and accessible (≥ v1.8.0 if you want to use the YAML override path; otherwise the dashboard UI is fine)
 - GitHub repository with Actions enabled
-- GitHub Personal Access Token or App Token with appropriate permissions
 
 ## Quick Setup
 
-### Step 1: Get GitHub Runner Token
+### Step 1: Get a GitHub registration token
 
-#### Method 1: Repository Runner Token (Recommended)
+1. In your GitHub repository, go to **Settings → Actions → Runners**.
+2. Click **"New self-hosted runner"**.
+3. Select **Linux** as the operating system.
+4. From the configure command, copy the value after `--token` (it looks like `AABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890`).
+5. This is your `GITHUB_TOKEN`. It expires in 1 hour, so don't generate it until you're ready to deploy.
 
-1. Go to your GitHub repository
-2. Navigate to **Settings** → **Actions** → **Runners**
-3. Click **"New self-hosted runner"**
-4. Select **Linux** as the operating system
-5. Copy the token from the configuration command (it looks like `AABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890`)
-6. Use this token as your `GITHUB_TOKEN` environment variable
+> **Security note:** Treat this token like an API key. Anyone who has it within the next hour can register a runner under your repo. Don't paste it into chat tools, screenshots, etc.
 
-> **Note**: Repository runner tokens are temporary and expire after 1 hour if not used, but once the runner is configured, it will continue to work.
+### Step 2: Create the CapRover app
 
-#### Method 2: Personal Access Token (Alternative)
+1. Open your CapRover dashboard.
+2. Go to **Apps → Create New App**.
+3. App Name: `github-runner` (or any descriptive name — for multi-repo setups, name per repo, e.g. `github-runner-myproject`).
+4. Click **Create New App**. Don't deploy code yet.
 
-If you prefer using a Personal Access Token (useful for automation or multiple repositories):
+### Step 3: Configure the persistent volume (one-time, before first deploy)
 
-1. Go to GitHub Settings → Developer settings → Personal access tokens
-2. Create a new token with these permissions:
-   - `repo` (for private repos) or `public_repo` (for public repos)
-   - `workflow`
-   - `admin:org` (if using organization-level runners)
+This is the critical step that makes registration persistent. Do this **before** you first deploy the app.
 
-### Step 2: Deploy to CapRover
+1. Open the new app → **App Configs** tab.
+2. Scroll to **Persistent Directories** and click **Add Persistent Directory**.
+3. Fill in:
+   - **Path in App:** `/home/runner` — **always exactly this**. Do not change it; the runner binary lives in this directory and expects to find `config.sh`, `run.sh`, `_diag/`, etc. here.
+   - **Label:** any name you want, e.g. `runner-home`. CapRover scopes persistent volumes per-app (the actual Docker volume becomes `<appname>--<label>`), so using the same label across multiple runner apps is safe. If you prefer, use `runner-home-<reponame>` to make the volume name self-documenting.
+4. Click **Save & Update**.
 
-1. **Create New App in CapRover**:
-   - Open your CapRover dashboard
-   - Go to "Apps" → "Create New App"
-   - App Name: `github-runner` (or any descriptive name)
+Skipping this step is the #1 cause of registration loops on redeploy.
 
-2. **Deploy the Application**:
-   - Method 1: Upload this project as a tar file
-   - Method 2: Connect to your Git repository containing this code
+### Step 4: Set environment variables
 
-3. **Configure Environment Variables**:
-   In the CapRover app settings, add these environment variables. Only `GITHUB_URL` and `GITHUB_TOKEN` are required — the runner will fail to start without them. The rest are optional and have sensible defaults.
+In the same **App Configs** tab, scroll to **Environmental Variables** and add:
 
-   ```bash
-   # Required
-   GITHUB_URL=https://github.com/your-username/your-repository
-   GITHUB_TOKEN=your_github_token_here
+| Variable | Required? | Value |
+|----------|-----------|-------|
+| `GITHUB_URL` | Yes (first boot only) | `https://github.com/your-username/your-repository` |
+| `GITHUB_TOKEN` | Yes (first boot only) | The token from Step 1 |
+| `RUNNER_NAME` | Optional | A unique name. Defaults to `caprover-runner-<hostname>`. |
+| `RUNNER_LABELS` | Optional | Comma-separated labels. Defaults to `self-hosted,linux,docker,caprover`. |
 
-   # Optional
-   RUNNER_NAME=caprover-runner-unique-name
-   RUNNER_LABELS=self-hosted,linux,docker,caprover
-   ```
+Click **Save & Update**.
 
-4. **Deploy**: Click "Deploy" in CapRover dashboard
+### Step 5: Deploy
 
-## Configuration
+Deploy the app via either:
+- **Method A (Git):** Connect this repo via **Deployment → Method 3: Deploy from Github/Bitbucket/Gitlab**, then push.
+- **Method B (Tar upload):** Run `caprover deploy` locally with the CapRover CLI, or upload a tarball via the dashboard.
 
-### Required Environment Variables
+Watch the logs (**App Configs → View Logs**) for:
 
-These two variables are absolutely necessary — the entrypoint script validates them on startup and exits with an error if either is missing.
+```
+First boot - registering runner...
+...
+√ Connected to GitHub
+...
+Listening for Jobs
+```
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `GITHUB_URL` | Full URL to your GitHub repository or organization | `https://github.com/username/repo` |
-| `GITHUB_TOKEN` | GitHub runner registration token (or PAT with appropriate scopes) | `ghp_xxxxxxxxxxxx` |
+That last line is the success signal.
 
-### Optional Environment Variables
+### Step 6: Clear the registration token (recommended)
+
+Once you see `Listening for Jobs`:
+
+1. Go back to **App Configs → Environmental Variables**.
+2. **Clear the `GITHUB_TOKEN` value** (delete it). The token has already been consumed and will be useless within an hour anyway. Leaving stale secrets in env vars is bad hygiene.
+3. Click **Save & Update**. The container will restart, see the existing config on the volume, and reconnect without needing the token.
+
+You can also clear `GITHUB_URL` if you like, but it's harmless to leave.
+
+That's it. From here on, restarts and redeploys reuse the volume. No tokens, no clicks.
+
+## Configuration reference
+
+### Environment variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `RUNNER_NAME` | Unique name for the runner | `caprover-runner-$(hostname)` |
-| `RUNNER_LABELS` | Comma-separated labels for the runner | `self-hosted,linux,docker,caprover` |
+| `GITHUB_URL` | GitHub repo or org URL. Only required on first boot (when `/home/runner/.runner` doesn't exist yet). | — |
+| `GITHUB_TOKEN` | Registration token. Only required on first boot. | — |
+| `RUNNER_NAME` | Unique name shown in GitHub's runners list. | `caprover-runner-$(hostname)` |
+| `RUNNER_LABELS` | Comma-separated labels. | `self-hosted,linux,docker,caprover` |
+| `WATCHDOG_MAX_SILENCE_SECS` | If no broker activity is logged for this many seconds, the watchdog kills the runner and lets CapRover restart it. | `900` (15 min) |
+| `WATCHDOG_INTERVAL_SECS` | How often the watchdog checks the diag log. | `60` |
+| `WATCHDOG_GRACE_PERIOD_SECS` | How long the watchdog waits after startup before its first check. | `300` (5 min) |
 
-## Multiple Repository Setup
+### Persistent volume
 
-### Option 1: Single Runner (Switch Repositories)
+| Container path | Why it must persist |
+|----------------|---------------------|
+| `/home/runner` | Holds `.runner`, `.credentials`, `.credentials_rsaparams` (registration state) plus the runner's working directory. |
 
-To use the same runner for different repositories:
+## Multiple runners for multiple repositories
 
-1. Stop the CapRover app
-2. Update `GITHUB_URL` and `GITHUB_TOKEN` environment variables
-3. Restart the app
+Create one CapRover app per repo. Each app gets its **own persistent volume** — don't share volumes between apps, since each volume is bound to one repo's registration credentials.
 
-### Option 2: Multiple Runners (Recommended)
+What changes per runner:
+- **App name:** must be unique (e.g. `github-runner-project1`, `github-runner-project2`).
+- **`GITHUB_URL`:** the new repo URL.
+- **`GITHUB_TOKEN`:** a fresh registration token from that repo.
+- **`RUNNER_NAME`** (optional): handy if you want the runner to show up under a recognisable name in GitHub.
 
-Create separate CapRover apps for each repository:
+What stays the same per runner:
+- **Path in App** for the persistent directory: always `/home/runner`.
+- **Label** for the persistent directory: can be the same (`runner-home`) for every app — CapRover namespaces persistent volumes by app, so the actual Docker volumes don't collide. There's no need to invent a unique label per runner.
+- The Docker image / source code: same for all of them.
 
-```bash
-# App 1: github-runner-project1
-GITHUB_URL=https://github.com/username/project1
-GITHUB_TOKEN=token_for_project1
-RUNNER_NAME=caprover-project1-runner
+So for each new runner: create app → add Persistent Directory (`/home/runner` → `runner-home`) → set the three env vars → deploy → clear `GITHUB_TOKEN` after `Listening for Jobs`. That's it.
 
-# App 2: github-runner-project2  
-GITHUB_URL=https://github.com/username/project2
-GITHUB_TOKEN=token_for_project2
-RUNNER_NAME=caprover-project2-runner
+```
+github-runner-project1  → volume: github-runner-project1--runner-home  → registers to github.com/you/project1
+github-runner-project2  → volume: github-runner-project2--runner-home  → registers to github.com/you/project2
 ```
 
-## Usage in GitHub Actions
+## Switching an existing runner to a different repo
 
-Once deployed, use your self-hosted runner in workflows:
+The persistent volume is tied to the original repo's credentials, so you can't just change `GITHUB_URL` and restart.
+
+Either:
+- **Cleaner:** create a new app for the new repo, leave the old one (or delete it).
+- **In-place:** SSH into the container (`docker exec -it ...`), run `./config.sh remove --token <old-token-or-PAT>`, delete `/home/runner/.runner` and `.credentials*`, set the new `GITHUB_URL` + `GITHUB_TOKEN` env vars, restart.
+
+## Usage in GitHub Actions
 
 ```yaml
 name: CI/CD Pipeline
@@ -122,102 +161,69 @@ on: [push, pull_request]
 
 jobs:
   build:
-    runs-on: self-hosted  # or use specific labels
-    # runs-on: [self-hosted, caprover]
-    
+    runs-on: self-hosted   # or use specific labels: [self-hosted, caprover]
     steps:
       - uses: actions/checkout@v4
-      - name: Run tests
-        run: |
-          echo "Running on self-hosted runner!"
-          # Your build/test commands here
+      - run: echo "Running on self-hosted runner!"
 ```
 
 ## Monitoring & Troubleshooting
 
-### Check Runner Status
+### Where to look
+- **CapRover Dashboard → your app → View Logs** for runner output.
+- **GitHub Repository → Settings → Actions → Runners** to confirm Idle status.
 
-1. **CapRover Dashboard**: Monitor app logs and status
-2. **GitHub Repository**: Settings → Actions → Runners
+### Common issues
 
-### Common Issues
+**Registration loop on every restart (`POST /actions/runner-registration → 404 Not Found`)**
+The persistent volume is missing or the registration token has expired. Confirm Step 3 was completed (volume mounted at `/home/runner`), generate a fresh token, set it as `GITHUB_TOKEN`, redeploy. After `Listening for Jobs` appears, clear the token env var.
 
-**Runner not appearing in GitHub**:
-- Verify `GITHUB_TOKEN` has correct permissions
-- Check `GITHUB_URL` is correct and accessible
-- Review CapRover app logs for error messages
+**Runner shows "Idle" in GitHub but jobs aren't being picked up**
+The included watchdog (`watchdog.sh`) is designed to catch this. It tails `/home/runner/_diag/Runner_*.log` for broker-listener activity and, if nothing has happened for `WATCHDOG_MAX_SILENCE_SECS` (default 15 min), kills the runner so CapRover restarts the container into a fresh state. If you're still seeing this, check the container logs for `[watchdog]` lines to see what it's observing — and consider lowering `WATCHDOG_MAX_SILENCE_SECS`.
 
-**Runner offline**:
-- Check CapRover app status
-- Restart the app if needed
-- Verify network connectivity
+**`Error: GITHUB_TOKEN is required for first-time registration`**
+The persistent volume is empty (no prior registration) and you didn't set `GITHUB_TOKEN`. Generate a fresh token, set it, redeploy.
 
-**Token expired**:
-- Generate new GitHub token
-- Update `GITHUB_TOKEN` environment variable
-- Restart the app
+**Runner appears with a different random name every time**
+Container is recreating without the persistent volume — the entrypoint is hitting the first-boot path on every restart. Verify Step 3.
 
-### Viewing Logs
+### Viewing logs
 
 ```bash
-# In CapRover dashboard, go to your app and click "View Logs"
-# Or use CapRover CLI:
 caprover logs --appName github-runner
 ```
 
-## Security Best Practices
+## Security best practices
 
-1. **Token Management**:
-   - Use tokens with minimal required permissions
-   - Rotate tokens regularly
-   - Store tokens securely in CapRover environment variables
-
-2. **Network Security**:
-   - Leverage CapRover's network isolation
-   - Consider using organization-level runners for better security
-
-3. **Resource Limits**:
-   - Set appropriate CPU/memory limits in CapRover
-   - Monitor resource usage
+1. **Token hygiene:** Set `GITHUB_TOKEN` only when registering, then clear it. Never commit a token. Don't paste it into chat / screenshots.
+2. **Repo-scoped runners:** Prefer per-repo runners over org-level ones for blast-radius reasons.
+3. **Resource limits:** Set CPU/memory limits in CapRover so a runaway workflow can't starve other apps.
+4. **Don't run untrusted PRs:** GitHub's docs warn against using self-hosted runners for public-repo PR workflows; they're meant for trusted code.
 
 ## Updating
 
-To update the runner:
+To update the runner image:
 
-1. Pull latest changes to this repository
-2. Redeploy the CapRover app
-3. The runner will automatically update and re-register
+1. Pull latest changes to this repo.
+2. Redeploy the CapRover app.
+3. The volume is preserved, so no re-registration is needed. The runner will restart and reconnect using the existing credentials.
 
 ## Project Structure
 
 ```
 .
 ├── captain-definition     # CapRover deployment configuration
-├── Dockerfile            # Container definition
-├── entrypoint.sh         # Runner startup script
-└── README.md            # This file
+├── Dockerfile             # Container definition
+├── entrypoint.sh          # Runner startup script (skip-if-configured + run + watchdog)
+├── watchdog.sh            # Listener-health watchdog
+├── TO-FIX.md              # Reliability fixes log
+└── README.md              # This file
 ```
 
-## Contributing
+## Why this approach?
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test with your CapRover setup
-5. Submit a pull request
-
-## License
-
-This project is open source. Please check the repository for license details.
-
----
-
-## Why Use This Approach?
-
-✓ **Integrated**: Works seamlessly with existing CapRover setup  
-✓ **Manageable**: Easy management through CapRover dashboard  
-✓ **Reliable**: Automatic restarts and monitoring  
-✓ **Isolated**: Network isolation for security  
-✓ **Scalable**: Easy to scale or remove runners  
-
-Your GitHub runner becomes just another service in your CapRover ecosystem, without any risk to your existing Docker services.
+- **Integrated:** works seamlessly with existing CapRover setup
+- **Manageable:** dashboard + log viewer for everything
+- **Reliable:** persistent volume means registration survives restarts and redeploys
+- **Isolated:** network isolation for security
+- **Scalable:** one app per repo, scriptable via the CapRover API for fleets
