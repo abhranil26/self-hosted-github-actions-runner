@@ -216,7 +216,6 @@ To update the runner image:
 ├── Dockerfile             # Container definition
 ├── entrypoint.sh          # Runner startup script (skip-if-configured + run + watchdog)
 ├── watchdog.sh            # Listener-health watchdog
-├── TO-FIX.md              # Reliability fixes log
 └── README.md              # This file
 ```
 
